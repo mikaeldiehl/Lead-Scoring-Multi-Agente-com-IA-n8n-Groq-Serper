@@ -1,0 +1,582 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const body = $input.item.json;\n\nconst nome = body['Nome completo'] || '';\nconst email = body['Email'] || '';\nconst empresa = body['Empresa'] || '';\nconst cargo = body['Cargo'] || '';\nconst site = body['Site da empresa'] || '';\n\nif (!nome || !empresa) {\n  throw new Error('Nome e empresa são obrigatórios');\n}\n\nreturn {\n  json: { nome, email, empresa, cargo, site }\n};"
+      },
+      "name": "Extrai Dados do Lead",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -2192,
+        192
+      ],
+      "id": "c56ed00e-f2b8-41f6-bf7a-1edd6b835a26",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://google.serper.dev/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "SUA_CHAVE_SERPER_API_AQUI"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"q\": \"{{ $json.empresa }} empresa site:linkedin.com OR site:{{ $json.site }} notícias\",\n  \"num\": 5,\n  \"hl\": \"pt-br\"\n}",
+        "options": {}
+      },
+      "name": "Agente 1 — Busca Web (Serper)",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        -1968,
+        192
+      ],
+      "id": "9c588793-0f68-4967-87e3-20ceb1f7a9d7",
+      "typeVersion": 4.4,
+      "notes": "Serper API: google.serper.dev — plano gratuito tem 2500 buscas/mês"
+    },
+    {
+      "parameters": {
+        "jsCode": "const serperData = $input.item.json;\nconst lead = $('Extrai Dados do Lead').item.json;\n\nconst organicResults = serperData.organic || [];\nconst knowledgeGraph = serperData.knowledgeGraph || {};\n\nconst resumoBusca = organicResults\n  .slice(0, 4)\n  .map(r => `- ${r.title}: ${r.snippet}`)\n  .join('\\n');\n\nconst contextoEmpresa = knowledgeGraph.description || '';\n\nconst promptPesquisa = `Com base nas informações abaixo sobre a empresa \"${lead.empresa}\", extraia e estruture os seguintes dados em JSON:\n\n1. setor (ex: SaaS, E-commerce, Fintech, Indústria, Serviços, Saúde, Educação, etc)\n2. porte_estimado (Startup, Pequena, Média, Grande, Enterprise) — baseie-se nas informações disponíveis\n3. tecnologias_usadas (array de tecnologias mencionadas, se houver)\n4. momento_atual (crescimento, expansão, desafio, estável — baseado em notícias)\n5. resumo_empresa (2 frases sobre o que a empresa faz)\n6. pontos_de_dor_possiveis (array com 2-3 possíveis dores baseadas no setor e porte)\n\nInformações encontradas:\nEmpresa: ${lead.empresa}\nSite: ${lead.site}\nCargo do contato: ${lead.cargo}\nDescrição: ${contextoEmpresa}\n\nResultados de busca:\n${resumoBusca}\n\nRetorne APENAS um JSON válido, sem explicações.`;\n\nconst messages = [\n  {\n    role: 'system',\n    content: 'Você é um especialista em inteligência de mercado B2B. Analise informações de empresas e retorne APENAS JSON válido, sem markdown, sem explicações.'\n  },\n  {\n    role: 'user',\n    content: promptPesquisa\n  }\n];\n\nconst bodyString = JSON.stringify({\n  model: 'llama-3.3-70b-versatile',\n  messages: messages,\n  temperature: 0.3,\n  max_tokens: 800\n});\n\nreturn {\n  json: {\n    lead,\n    promptPesquisa,\n    resumoBusca,\n    contextoEmpresa,\n    messages,\n    bodyString\n  }\n};"
+      },
+      "name": "Monta Prompt — Agente Pesquisador",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -1744,
+        192
+      ],
+      "id": "9c67b207-e7dd-45ca-8f4e-d7eb5e37a215",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "const groqResponse = $input.item.json;\nconst perfilBruto = groqResponse.choices[0].message.content;\nconst lead = $('Monta Prompt — Agente Pesquisador').item.json.lead;\n\nlet perfil = {};\ntry {\n  const clean = perfilBruto.replace(/```json|```/g, '').trim();\n  perfil = JSON.parse(clean);\n} catch(e) {\n  perfil = { setor: 'Desconhecido', porte_estimado: 'Desconhecido', tecnologias_usadas: [], momento_atual: 'estável', resumo_empresa: perfilBruto.slice(0, 200), pontos_de_dor_possiveis: [] };\n}\n\nconst promptScore = `Você é um especialista em qualificação de leads B2B. Avalie o lead abaixo com base nos critérios do ICP e gere um score de 0 a 100.\\n\\nCRITÉRIOS:\\n- Setor (SaaS/Tech/Fintech = 25pts | E-commerce/Serviços = 20pts | Outros = 10pts)\\n- Porte (Enterprise = 25pts | Grande = 20pts | Média = 15pts | Pequena = 10pts | Startup = 5pts)\\n- Cargo (C-Level/Diretor/VP = 20pts | Gerente = 15pts | Analista = 5pts)\\n- Momento (Crescimento/Expansão = 15pts | Estável = 10pts | Desafio = 5pts)\\n- Tecnologias modernas = bônus até 15pts\\n\\nDADOS:\\nNome: ${lead.nome}\\nEmpresa: ${lead.empresa}\\nCargo: ${lead.cargo}\\nSetor: ${perfil.setor}\\nPorte: ${perfil.porte_estimado}\\nMomento: ${perfil.momento_atual}\\nTecnologias: ${(perfil.tecnologias_usadas || []).join(', ')}\\nResumo: ${perfil.resumo_empresa}\\n\\nRetorne APENAS JSON:\\n{\\n  \"score\": <0-100>,\\n  \"classificacao\": \"<Frio|Morno|Quente|Hot>\",\\n  \"justificativa\": \"<2 frases>\",\\n  \"pontos_positivos\": [\"<até 3>\"],\\n  \"pontos_negativos\": [\"<até 2>\"]\\n}`;\n\nconst bodyString = JSON.stringify({\n  model: 'llama-3.3-70b-versatile',\n  messages: [\n    { role: 'system', content: 'Você é um especialista em qualificação de leads B2B. Retorne APENAS JSON válido.' },\n    { role: 'user', content: promptScore }\n  ],\n  temperature: 0.2,\n  max_tokens: 600\n});\n\nreturn {\n  json: {\n    lead,\n    perfil,\n    promptScore,\n    bodyString\n  }\n};"
+      },
+      "name": "Monta Prompt — Agente Pontuador",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -1296,
+        192
+      ],
+      "id": "34ac413b-4d6a-4d7e-9684-62de6153e308",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "SUA_CHAVE_QGROK_API_AQUI"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $('Monta Prompt — Agente Pontuador').item.json.bodyString }}",
+        "options": {}
+      },
+      "name": "Agente 2 — LLM Pontuador (Groq)",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        -1072,
+        192
+      ],
+      "id": "fa28992a-d5e4-4823-beb7-1f8df372c281",
+      "typeVersion": 4.4,
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "SEU_CREDENCIAL_BEARER_AQUI",
+          "name": "Bearer Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const groqResponse = $input.item.json;\nconst scoreBruto = groqResponse.choices[0].message.content;\nconst { lead, perfil } = $('Monta Prompt — Agente Pontuador').item.json;\n\nlet scoreData = {};\ntry {\n  const clean = scoreBruto.replace(/```json|```/g, '').trim();\n  scoreData = JSON.parse(clean);\n} catch(e) {\n  scoreData = { score: 0, classificacao: 'Frio', justificativa: 'Erro ao processar score', pontos_positivos: [], pontos_negativos: [] };\n}\n\nconst score = Number(scoreData.score) || 0;\nconst isHot = score >= 70;\n\nconst promptEmail = \"Escreva um e-mail de prospecção personalizado.\\n\\nREGRAS:\\n- Tom profissional mas próximo\\n- Mencione algo específico sobre a empresa\\n- Foque em 1 dor específica\\n- Máximo 5 parágrafos curtos\\n- CTA claro no final\\n- Assunto separado por ---\\n- Escreva em português brasileiro\\n- Assine o e-mail com o nome \\\"Mikael Diehl\\\" e o cargo \\\"Consultor de TI\\\"\\n- Use exatamente este link de agendamento: SEU_CALENDLY_LINK_AQUI\\n\\nDADOS:\\nNome: \" + lead.nome + \"\\nEmpresa: \" + lead.empresa + \"\\nCargo: \" + lead.cargo + \"\\nSetor: \" + perfil.setor + \"\\nResumo: \" + perfil.resumo_empresa + \"\\nMomento: \" + perfil.momento_atual + \"\\nDores: \" + (perfil.pontos_de_dor_possiveis || []).join(', ') + \"\\nPontos positivos: \" + (scoreData.pontos_positivos || []).join(', ') + \"\\n\\nRetorne:\\nASSUNTO: <assunto>\\n---\\n<corpo do email>\";\n\nconst bodyString = JSON.stringify({\n  model: 'llama-3.3-70b-versatile',\n  messages: [\n    { role: 'system', content: 'Você é um especialista em copywriting B2B. Escreva e-mails de prospecção personalizados, humanos e eficazes.' },\n    { role: 'user', content: promptEmail }\n  ],\n  temperature: 0.7,\n  max_tokens: 800\n});\n\nreturn {\n  json: {\n    lead,\n    perfil,\n    scoreData,\n    score,\n    isHot,\n    promptEmail,\n    bodyString\n  }\n};"
+      },
+      "name": "Parse Score + Monta Prompt Email",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -848,
+        192
+      ],
+      "id": "7887ab64-8b8b-48cc-812f-2d939ed1df77",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer SUA_CHAVE_QGROK_API_AQUI"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $('Parse Score + Monta Prompt Email').item.json.bodyString }}",
+        "options": {}
+      },
+      "name": "Agente 3 — LLM Escritor (Groq)",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        -624,
+        192
+      ],
+      "id": "3b9543fb-9417-4e80-b532-b7ac7709330f",
+      "typeVersion": 4.4
+    },
+    {
+      "parameters": {
+        "jsCode": "const groqResponse = $input.item.json;\nconst emailBruto = groqResponse.choices[0].message.content;\nconst { lead, perfil, scoreData, score, isHot } = $('Parse Score + Monta Prompt Email').item.json;\n\nconst partes = emailBruto.split('---');\nlet assunto = 'Oportunidade para ' + lead.empresa;\nlet corpoEmail = emailBruto;\n\nif (partes.length >= 2) {\n  assunto = partes[0].replace('ASSUNTO:', '').trim();\n  corpoEmail = partes.slice(1).join('---').trim();\n}\n\nreturn {\n  json: {\n    lead,\n    perfil,\n    scoreData,\n    score,\n    isHot,\n    assunto,\n    corpoEmail\n  }\n};"
+      },
+      "name": "Parse E-mail Gerado",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -400,
+        192
+      ],
+      "id": "a34c9c22-bbd7-4407-bb69-ec680b4dd514",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-score",
+              "leftValue": "={{ $json.score }}",
+              "rightValue": 70,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Score >= 70? (Lead Quente)",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        -176,
+        192
+      ],
+      "id": "7b6d943a-095d-4105-8d50-088cbba4e1f8",
+      "typeVersion": 2.1
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.lead.email }}",
+        "subject": "={{ $json.assunto }}",
+        "message": "={{ $json.corpoEmail }}",
+        "options": {
+          "replyTo": "vendas@suaempresa.com"
+        }
+      },
+      "name": "Envia E-mail (Lead Quente)",
+      "type": "n8n-nodes-base.gmail",
+      "position": [
+        48,
+        0
+      ],
+      "id": "be3592e4-9ed7-4ac3-bcb2-675a83815fed",
+      "typeVersion": 2.1,
+      "webhookId": "SEU_WEBHOOK_GMAIL_AQUI",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SEU_CREDENCIAL_GMAIL_AQUI",
+          "name": "Gmail account 4"
+        }
+      },
+      "notes": "Configure OAuth2 do Gmail nas credenciais do n8n"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "SEU_WEBHOOK_SLACK_AQUI",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"🔥 *LEAD QUENTE DETECTADO!*\\n\\n*Nome:* {{ $('Parse E-mail Gerado').item.json.lead.nome }}\\n*Empresa:* {{ $('Parse E-mail Gerado').item.json.lead.empresa }}\\n*Cargo:* {{ $('Parse E-mail Gerado').item.json.lead.cargo }}\\n*Email:* {{ $('Parse E-mail Gerado').item.json.lead.email }}\\n*Score:* {{ $('Parse E-mail Gerado').item.json.score }}/100\\n*Classificação:* {{ $('Parse E-mail Gerado').item.json.scoreData.classificacao }}\\n*Setor:* {{ $('Parse E-mail Gerado').item.json.perfil.setor }}\\n*Porte:* {{ $('Parse E-mail Gerado').item.json.perfil.porte_estimado }}\\n\\n*Justificativa:* {{ $('Parse E-mail Gerado').item.json.scoreData.justificativa }}\\n\\n✅ E-mail de prospecção enviado automaticamente!\"\n}",
+        "options": {}
+      },
+      "name": "Notifica Vendedor (Slack)",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        48,
+        192
+      ],
+      "id": "fdaa6779-933f-4840-a2a9-4894e7a2b09d",
+      "typeVersion": 4.4
+    },
+    {
+      "parameters": {
+        "jsCode": "const { lead, perfil, scoreData, score, assunto, corpoEmail } = $('Parse E-mail Gerado').item.json;\n\nreturn {\n  json: {\n    lead,\n    perfil,\n    scoreData,\n    score,\n    assunto,\n    corpoEmail,\n    nurturingSequencia: [\n      { dia: 3, acao: 'Enviar conteúdo relevante do setor' },\n      { dia: 7, acao: 'Convidar para webinar ou demo' },\n      { dia: 14, acao: 'Follow-up com case de sucesso' },\n      { dia: 30, acao: 'Requalificar ou arquivar' }\n    ],\n    statusCRM: 'nurturing'\n  }\n};"
+      },
+      "name": "Define Sequência de Nurturing",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        48,
+        384
+      ],
+      "id": "1829200b-099c-4bdb-b58e-1d398a8fd0cd",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "const dados = $('Parse E-mail Gerado').item.json;\nconst { lead, perfil, scoreData, score } = dados;\n\nconst registro = {\n  timestamp: new Date().toISOString(),\n  nome: lead.nome,\n  email: lead.email,\n  empresa: lead.empresa,\n  cargo: lead.cargo,\n  setor: perfil.setor,\n  porte: perfil.porte_estimado,\n  score: score,\n  classificacao: scoreData.classificacao,\n  justificativa: scoreData.justificativa,\n  status: score >= 70 ? 'email_enviado' : 'nurturing',\n  processado: true\n};\n\nreturn { json: registro };"
+      },
+      "name": "Prepara Registro Final",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        272,
+        192
+      ],
+      "id": "bdfc724d-4458-4c68-a7da-d91530f178d2",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/SEU_ID_DE_PLANILHA_AQUI/",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Página1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "name": "Salva no Google Sheets (CRM)",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [
+        496,
+        192
+      ],
+      "id": "b7aed524-00d6-45d5-8aba-0b9724f27ea6",
+      "typeVersion": 4.4,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "LBeZeyinyyVSUBd9",
+          "name": "Google Sheets account 3"
+        }
+      },
+      "notes": "Crie uma planilha com colunas: timestamp, nome, email, empresa, cargo, setor, porte, score, classificacao, justificativa, status"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"messages\": \"={{ $json.messages }}\",\n  \"temperature\": 0.3,\n  \"max_tokens\": 800\n}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "=",
+        "body": "={{ $json.bodyString }}",
+        "options": {}
+      },
+      "name": "Agente 1 — LLM Pesquisador (Groq)",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        -1520,
+        192
+      ],
+      "id": "6337bdba-f46f-48e9-996b-f19d0ab582fd",
+      "typeVersion": 4.4,
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "SEU_CREDENCIAL_BEARER_AQUI",
+          "name": "Bearer Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "formTitle": "Cadastro de Lead — TechNova",
+        "formDescription": "Preencha os dados para qualificar seu lead automaticamente",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Nome completo"
+            },
+            {
+              "fieldLabel": "Email",
+              "fieldType": "email"
+            },
+            {
+              "fieldLabel": "Empresa"
+            },
+            {
+              "fieldLabel": "Cargo"
+            },
+            {
+              "fieldLabel": "Site da empresa"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.5,
+      "position": [
+        -2416,
+        192
+      ],
+      "id": "82ef1228-8749-426c-940d-747718db8879",
+      "name": "On form submission",
+      "webhookId": "SEU_WEBHOOK_ID_AQUI"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Extrai Dados do Lead": {
+      "main": [
+        [
+          {
+            "node": "Agente 1 — Busca Web (Serper)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente 1 — Busca Web (Serper)": {
+      "main": [
+        [
+          {
+            "node": "Monta Prompt — Agente Pesquisador",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monta Prompt — Agente Pesquisador": {
+      "main": [
+        [
+          {
+            "node": "Agente 1 — LLM Pesquisador (Groq)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monta Prompt — Agente Pontuador": {
+      "main": [
+        [
+          {
+            "node": "Agente 2 — LLM Pontuador (Groq)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente 2 — LLM Pontuador (Groq)": {
+      "main": [
+        [
+          {
+            "node": "Parse Score + Monta Prompt Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Score + Monta Prompt Email": {
+      "main": [
+        [
+          {
+            "node": "Agente 3 — LLM Escritor (Groq)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente 3 — LLM Escritor (Groq)": {
+      "main": [
+        [
+          {
+            "node": "Parse E-mail Gerado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse E-mail Gerado": {
+      "main": [
+        [
+          {
+            "node": "Score >= 70? (Lead Quente)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score >= 70? (Lead Quente)": {
+      "main": [
+        [
+          {
+            "node": "Envia E-mail (Lead Quente)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Notifica Vendedor (Slack)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Define Sequência de Nurturing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Envia E-mail (Lead Quente)": {
+      "main": [
+        [
+          {
+            "node": "Prepara Registro Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notifica Vendedor (Slack)": {
+      "main": [
+        [
+          {
+            "node": "Prepara Registro Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Define Sequência de Nurturing": {
+      "main": [
+        [
+          {
+            "node": "Prepara Registro Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepara Registro Final": {
+      "main": [
+        [
+          {
+            "node": "Salva no Google Sheets (CRM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente 1 — LLM Pesquisador (Groq)": {
+      "main": [
+        [
+          {
+            "node": "Monta Prompt — Agente Pontuador",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Extrai Dados do Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "2778fb47-f384-47c3-8669-6eb8bdce2c0e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "5623fbe74ff6c51ca0a72aebe46b1ea914f9cf08e35bddd97f1c6c0a2f764b76"
+  },
+  "id": "UfCMuWT89Qb4CoH4",
+  "tags": []
+}
