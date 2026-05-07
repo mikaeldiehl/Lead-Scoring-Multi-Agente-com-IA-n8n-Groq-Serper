@@ -215,7 +215,7 @@ No nó **Parse Score + Monta Prompt Email**, edite a linha:
 ### Alterar link de agendamento
 No mesmo nó, edite:
 ```
-- Use exatamente este link de agendamento: https://calendly.com/mikael-noia
+- Use exatamente este link de agendamento: https://calendly.com/SEU_USUARIO
 ```
 
 ### Alterar critérios do ICP
